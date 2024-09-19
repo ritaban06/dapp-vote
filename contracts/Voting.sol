@@ -40,6 +40,7 @@ contract VotingSystem {
     }
 
     function addCandidate(string memory _name) public onlyOwner {
+        require(block.timestamp < votingStart, "Cannot add candidates after voting has started");
         candidates.push(Candidate({
             name: _name,
             voteCount: 0

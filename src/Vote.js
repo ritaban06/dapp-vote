@@ -1,196 +1,224 @@
-import React, { useState, useEffect, useContext, useCallback } from 'react';
+import React, { useContext, useState, useEffect, useCallback } from 'react';
 import { EthereumContext } from './EthereumContext';
-import { Button, Input, List, message, Spin, Typography } from 'antd';
-import { ethers } from 'ethers';
-
-const { Title, Text } = Typography;
 
 const Vote = () => {
   const { contract, account } = useContext(EthereumContext);
-  const [candidates, setCandidates] = useState([]);
-  const [newCandidate, setNewCandidate] = useState('');
-  const [voterAddress, setVoterAddress] = useState('');
-  const [selectedCandidate, setSelectedCandidate] = useState(null);
-  const [votingStatus, setVotingStatus] = useState(false);
-  const [winner, setWinner] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [state, setState] = useState({
+    candidateName: '',
+    candidates: [],
+    votingStatus: false,
+    error: null,
+    winner: null,
+    isOwner: false,
+    isLoading: true,
+  });
 
-  const loadCandidates = useCallback(async () => {
-    if (contract) {
-      try {
-        setLoading(true);
-        const candidateCount = await contract.getCandidateCount();
-        const loadedCandidates = await Promise.all(
-          Array(candidateCount.toNumber())
-            .fill()
-            .map(async (_, i) => {
-              const candidate = await contract.candidates(i);
-              return { 
-                id: i, 
-                name: candidate.name, 
-                voteCount: candidate.voteCount.toNumber() 
-              };
-            })
-        );
-        setCandidates(loadedCandidates);
-      } catch (error) {
-        console.error("Error loading candidates:", error);
-        message.error('Failed to load candidates');
-      } finally {
-        setLoading(false);
+  const updateState = (newState) => {
+    setState((prevState) => ({ ...prevState, ...newState }));
+  };
+
+  const checkWinner = useCallback(async () => {
+    if (!contract) return;
+    try {
+      const { winnerName, winningVoteCount } = await contract.getWinner();
+      updateState({
+        winner: { name: winnerName, votes: winningVoteCount.toString() }
+      });
+    } catch (error) {
+      if (!error.message.includes("Voting has not ended yet")) {
+        console.error("Failed to get winner:", error);
       }
     }
   }, [contract]);
 
-  const checkVotingStatus = useCallback(async () => {
-    if (contract) {
-      try {
-        const status = await contract.getVotingStatus();
-        setVotingStatus(status);
-      } catch (error) {
-        console.error("Error checking voting status:", error);
-        message.error('Failed to check voting status');
-      }
+  const fetchContractData = useCallback(async () => {
+    if (!contract || !account) {
+      console.log("Contract or account not available");
+      return;
     }
-  }, [contract]);
+
+    try {
+      updateState({ isLoading: true });
+
+      console.log("Fetching contract data...");
+
+      const [candidateCount, votingStatus, owner] = await Promise.all([
+        contract.getCandidateCount(),
+        contract.getVotingStatus(),
+        contract.owner(),
+      ]);
+
+      console.log("Candidate count:", candidateCount.toString());
+      console.log("Voting status:", votingStatus);
+      console.log("Contract owner:", owner);
+
+      console.log("Fetching candidates...");
+      const candidates = await Promise.all(
+        Array.from({ length: candidateCount.toNumber() }, async (_, i) => {
+          const candidate = await contract.candidates(i);
+          console.log(`Candidate ${i}:`, candidate);
+          return {
+            id: i,
+            name: candidate.name,
+            voteCount: candidate.voteCount.toString()
+          };
+        })
+      );
+
+      console.log("All candidates:", candidates);
+
+      updateState({
+        candidates,
+        votingStatus,
+        isOwner: owner.toLowerCase() === account.toLowerCase(),
+        isLoading: false,
+      });
+
+      if (!votingStatus) {
+        console.log("Checking winner...");
+        await checkWinner();
+      }
+
+      console.log("Contract data fetched successfully");
+    } catch (error) {
+      console.error("Failed to fetch contract data:", error);
+      updateState({
+        error: `Failed to load contract data: ${error.message}. Please check your connection and try again.`,
+        isLoading: false,
+      });
+    }
+  }, [contract, account, checkWinner]);
 
   useEffect(() => {
-    loadCandidates();
-    checkVotingStatus();
-  }, [contract, loadCandidates, checkVotingStatus]);
+    fetchContractData();
+  }, [fetchContractData]);
+
+  const handleInputChange = (e) => {
+    updateState({ candidateName: e.target.value });
+  };
 
   const addCandidate = async () => {
-    if (contract && newCandidate.trim()) {
-      try {
-        setLoading(true);
-        const tx = await contract.addCandidate(newCandidate.trim());
-        await tx.wait();
-        message.success('Candidate added successfully');
-        setNewCandidate('');
-        loadCandidates();
-      } catch (error) {
-        console.error("Error adding candidate:", error);
-        message.error('Failed to add candidate: ' + error.message);
-      } finally {
-        setLoading(false);
-      }
+    if (!contract || !state.isOwner || state.votingStatus) {
+      updateState({
+        error: "Cannot add candidate. Check your permissions and voting status."
+      });
+      return;
+    }
+
+    try {
+      const tx = await contract.addCandidate(state.candidateName);
+      await tx.wait();
+      updateState({ candidateName: '', error: null });
+      fetchContractData();
+    } catch (error) {
+      console.error("Failed to add candidate:", error);
+      updateState({
+        error: `Failed to add candidate: ${error.message}`
+      });
+    }
+  };
+
+  const castVote = async (candidateId) => {
+    if (!contract || !state.votingStatus) {
+      updateState({
+        error: "Cannot cast vote. Check voting status and your connection."
+      });
+      return;
+    }
+
+    try {
+      const tx = await contract.vote(candidateId);
+      await tx.wait();
+      updateState({ error: null });
+      fetchContractData();
+    } catch (error) {
+      console.error("Failed to cast vote:", error);
+      updateState({
+        error: `Failed to cast vote: ${error.message}`
+      });
     }
   };
 
   const registerVoter = async () => {
-    if (contract && voterAddress) {
-      try {
-        setLoading(true);
-        const trimmedAddress = voterAddress.trim();
-        if (!ethers.isAddress(trimmedAddress)) {
-          throw new Error('Invalid voter address');
-        }
-        const tx = await contract.registerVoter(trimmedAddress);
-        await tx.wait();
-        message.success('Voter registered successfully');
-        setVoterAddress('');
-      } catch (error) {
-        console.error("Error registering voter:", error);
-        message.error('Failed to register voter: ' + error.message);
-      } finally {
-        setLoading(false);
-      }
+    if (!contract || !state.isOwner || !account) {
+      updateState({
+        error: "Cannot register voter. Check your permissions and connection."
+      });
+      return;
+    }
+
+    try {
+      const tx = await contract.registerVoter(account);
+      await tx.wait();
+      updateState({ error: null });
+      fetchContractData();
+    } catch (error) {
+      console.error("Failed to register voter:", error);
+      updateState({
+        error: `Failed to register voter: ${error.message}`
+      });
     }
   };
 
-  const castVote = async () => {
-    if (contract && selectedCandidate !== null) {
-      try {
-        setLoading(true);
-        const tx = await contract.vote(selectedCandidate);
-        await tx.wait();
-        message.success('Vote cast successfully');
-        loadCandidates();
-        setSelectedCandidate(null);
-      } catch (error) {
-        console.error("Error casting vote:", error);
-        message.error('Failed to cast vote: ' + error.message);
-      } finally {
-        setLoading(false);
-      }
-    }
-  };
-
-  const getWinner = async () => {
-    if (contract) {
-      try {
-        setLoading(true);
-        const result = await contract.getWinner();
-        setWinner({ name: result[0], voteCount: result[1].toNumber() });
-      } catch (error) {
-        console.error("Error getting winner:", error);
-        message.error('Failed to get winner: ' + error.message);
-      } finally {
-        setLoading(false);
-      }
-    }
-  };
+  if (state.isLoading) {
+    return <div>Loading...</div>;
+  }
 
   return (
-    <Spin spinning={loading}>
-      <div style={{ maxWidth: '600px', margin: '0 auto', padding: '20px' }}>
-        <Title level={2}>Voting System</Title>
-        <Text>Connected Account: {account}</Text>
-        
-        <Title level={3}>Add Candidate</Title>
-        <Input 
-          value={newCandidate} 
-          onChange={(e) => setNewCandidate(e.target.value)} 
-          placeholder="Candidate Name" 
-          style={{ marginBottom: '10px' }}
-        />
-        <Button onClick={addCandidate} disabled={!newCandidate.trim()}>Add Candidate</Button>
+    <div className="vote-container">
+      <h1>Voting System</h1>
+      
+      {account && (
+        <p>Connected Account: {account} {state.isOwner && "(Contract Owner)"}</p>
+      )}
 
-        <Title level={3}>Register Voter</Title>
-        <Input 
-          value={voterAddress} 
-          onChange={(e) => setVoterAddress(e.target.value)} 
-          placeholder="Voter Address (0x...)" 
-          style={{ marginBottom: '10px' }}
-        />
-        <Button onClick={registerVoter} disabled={!voterAddress.trim() || !ethers.isAddress(voterAddress.trim())}>Register Voter</Button>
+      {!state.votingStatus && state.isOwner && (
+        <div className="add-candidate">
+          <h2>Add Candidate</h2>
+          <input 
+            type="text" 
+            value={state.candidateName} 
+            onChange={handleInputChange}
+            placeholder="Enter candidate name"
+          />
+          <button onClick={addCandidate}>Add Candidate</button>
+        </div>
+      )}
 
-        <Title level={3}>Candidates</Title>
-        <List
-          dataSource={candidates}
-          renderItem={(candidate) => (
-            <List.Item>
-              <Text>{candidate.name} - Votes: {candidate.voteCount}</Text>
-              <Button 
-                onClick={() => setSelectedCandidate(candidate.id)} 
-                disabled={!votingStatus}
-                type={selectedCandidate === candidate.id ? 'primary' : 'default'}
-              >
-                Select
-              </Button>
-            </List.Item>
-          )}
-        />
-
-        <Button 
-          onClick={castVote} 
-          disabled={selectedCandidate === null || !votingStatus}
-          style={{ marginTop: '20px' }}
-        >
-          Cast Vote
-        </Button>
-
-        <Title level={3}>Voting Status: {votingStatus ? 'Open' : 'Closed'}</Title>
-
-        <Button onClick={getWinner} disabled={votingStatus}>Get Winner</Button>
-        {winner && (
-          <div style={{ marginTop: '20px' }}>
-            <Title level={3}>Winner</Title>
-            <Text>{winner.name} with {winner.voteCount} votes</Text>
+      <h2>Candidates</h2>
+      <div className="candidates-list">
+        {state.candidates.map(candidate => (
+          <div key={candidate.id} className="candidate-item">
+            <span>{candidate.name} - Votes: {candidate.voteCount}</span>
+            <button 
+              onClick={() => castVote(candidate.id)} 
+              disabled={!state.votingStatus}
+            >
+              Vote
+            </button>
           </div>
-        )}
+        ))}
       </div>
-    </Spin>
+
+      {state.isOwner && (
+        <button onClick={registerVoter} className="register-voter">
+          Register Current Account as Voter
+        </button>
+      )}
+
+      {state.error && <p className="error-message">{state.error}</p>}
+      
+      <p className="voting-status">
+        Voting Status: {state.votingStatus ? "Open" : "Closed"}
+      </p>
+      
+      {state.winner && (
+        <div className="winner-info">
+          <h2>Winner</h2>
+          <p>{state.winner.name} with {state.winner.votes} votes</p>
+        </div>
+      )}
+    </div>
   );
 };
 
